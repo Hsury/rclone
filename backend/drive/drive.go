@@ -9,6 +9,7 @@ package drive
 
 import (
 	"bytes"
+	"container/ring"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -240,6 +242,9 @@ a non root folder as its starting point.
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
+		}, {
+			Name: "service_account_dir",
+			Help: "Service Account Credentials JSON dir path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -533,6 +538,7 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
+	ServiceAccountDir         string               `config:"service_account_dir"`
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -587,6 +593,44 @@ type Fs struct {
 	grouping         int32               // number of IDs to search at once in ListR - read with atomic
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
+	saFiles          *ring.Ring
+	saSwitchMutex    bool
+}
+
+func (f *Fs) loadServiceAccountDir() error {
+	if f.opt.ServiceAccountDir == "" {
+		return nil
+	}
+	saFiles, err := filepath.Glob(filepath.Join(f.opt.ServiceAccountDir, "*.json"))
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("error listing service account files in %s", f.opt.ServiceAccountDir))
+	}
+	f.saFiles = ring.New(len(saFiles))
+	for _, i := range saFiles {
+		f.saFiles.Value = i
+		f.saFiles.Next()
+	}
+	fs.LogPrintf(fs.LogLevelNotice, nil, "drive: loaded %d service account files from %s", len(saFiles), f.opt.ServiceAccountDir)
+	return nil
+}
+
+func (f *Fs) switchServiceAccount() error {
+	if f.saSwitchMutex {
+		return nil
+	}
+	f.saSwitchMutex = true
+	defer func() { f.saSwitchMutex = false }()
+	fs.LogPrintf(fs.LogLevelNotice, nil, "drive: switching service account file from %s", f.opt.ServiceAccountFile)
+	for i := 0; i < f.saFiles.Len(); i++ {
+		path := f.saFiles.Value.(string)
+		err := f.changeServiceAccountFile(context.TODO(), path)
+		f.saFiles = f.saFiles.Next()
+		if err == nil {
+			fs.LogPrintf(fs.LogLevelNotice, nil, "drive: switched service account file to %s", path)
+			return nil
+		}
+	}
+	return errors.New("all service account files are unavailable")
 }
 
 type baseObject struct {
@@ -660,6 +704,9 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
 					return false, fserrors.FatalError(err)
+				}
+				if f.saFiles != nil {
+					f.switchServiceAccount()
 				}
 				return true, err
 			} else if f.opt.StopOnDownloadLimit && reason == "downloadQuotaExceeded" {
@@ -1135,6 +1182,8 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 			return nil, errors.Wrap(err, "couldn't create Drive v2 client")
 		}
 	}
+
+	f.loadServiceAccountDir()
 
 	return f, nil
 }
