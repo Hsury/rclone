@@ -465,3 +465,11 @@ put them back in again.` >}}
   * K265 <k.265@qq.com>
   * Vesnyx <Vesnyx@users.noreply.github.com>
   * Dmitry Chepurovskiy <me@dm3ch.net>
+  * Rauno Ots <rauno.ots@cgi.com>
+  * Georg Neugschwandtner <georg.neugschwandtner@gmx.net>
+  * pvalls <polvallsrue@gmail.com>
+  * Robert Thomas <31854736+wolveix@users.noreply.github.com>
+  * Romeo Kienzler <romeo.kienzler@gmail.com>
+  * tYYGH <tYYGH@users.noreply.github.com>
+  * georne <77802995+georne@users.noreply.github.com>
+  * Maxwell Calman <mcalman@MacBook-Pro.local>
