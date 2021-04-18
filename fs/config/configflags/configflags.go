@@ -6,7 +6,6 @@ package configflags
 import (
 	"log"
 	"net"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -23,6 +22,7 @@ var (
 	// these will get interpreted into fs.Config via SetFlags() below
 	verbose         int
 	quiet           bool
+	configPath      string
 	dumpHeaders     bool
 	dumpBodies      bool
 	deleteBefore    bool
@@ -45,7 +45,7 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.DurationVarP(flagSet, &ci.ModifyWindow, "modify-window", "", ci.ModifyWindow, "Max time diff to be considered the same")
 	flags.IntVarP(flagSet, &ci.Checkers, "checkers", "", ci.Checkers, "Number of checkers to run in parallel.")
 	flags.IntVarP(flagSet, &ci.Transfers, "transfers", "", ci.Transfers, "Number of file transfers to run in parallel.")
-	flags.StringVarP(flagSet, &config.ConfigPath, "config", "", config.ConfigPath, "Config file.")
+	flags.StringVarP(flagSet, &configPath, "config", "", config.GetConfigPath(), "Config file.")
 	flags.StringVarP(flagSet, &config.CacheDir, "cache-dir", "", config.CacheDir, "Directory rclone will use for caching.")
 	flags.BoolVarP(flagSet, &ci.CheckSum, "checksum", "c", ci.CheckSum, "Skip based on checksum (if available) & size, not mod-time & size")
 	flags.BoolVarP(flagSet, &ci.SizeOnly, "size-only", "", ci.SizeOnly, "Skip based on size only, not mod-time or checksum")
@@ -128,6 +128,8 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &ci.RefreshTimes, "refresh-times", "", ci.RefreshTimes, "Refresh the modtime of remote files.")
 	flags.BoolVarP(flagSet, &ci.NoConsole, "no-console", "", ci.NoConsole, "Hide console window. Supported on Windows only.")
 	flags.StringVarP(flagSet, &dscp, "dscp", "", "", "Set DSCP value to connections. Can be value or names, eg. CS1, LE, DF, AF21.")
+	flags.DurationVarP(flagSet, &ci.FsCacheExpireDuration, "fs-cache-expire-duration", "", ci.FsCacheExpireDuration, "cache remotes for this long (0 to disable caching)")
+	flags.DurationVarP(flagSet, &ci.FsCacheExpireInterval, "fs-cache-expire-interval", "", ci.FsCacheExpireInterval, "interval to check for expired remotes")
 }
 
 // ParseHeaders converts the strings passed in via the header flags into HTTPOptions
@@ -265,10 +267,9 @@ func SetFlags(ci *fs.ConfigInfo) {
 		}
 	}
 
-	// Make the config file absolute
-	configPath, err := filepath.Abs(config.ConfigPath)
-	if err == nil {
-		config.ConfigPath = configPath
+	// Set path to configuration file
+	if err := config.SetConfigPath(configPath); err != nil {
+		log.Fatalf("--config: Failed to set %q as config path: %v", configPath, err)
 	}
 
 	// Set whether multi-thread-streams was set

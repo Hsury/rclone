@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -286,6 +287,7 @@ type Fs struct {
 	drain        *time.Timer // used to drain the pool when we stop using the connections
 	pacer        *fs.Pacer   // pacer for operations
 	savedpswd    string
+	transfers    int32 // count in use references
 }
 
 // Object is a remote SFTP file that has been stat'd (so it exists, but is not necessarily open for reading)
@@ -348,6 +350,23 @@ func (c *conn) closed() error {
 	return nil
 }
 
+// Show that we are doing an upload or download
+//
+// Call removeTransfer() when done
+func (f *Fs) addTransfer() {
+	atomic.AddInt32(&f.transfers, 1)
+}
+
+// Show the upload or download done
+func (f *Fs) removeTransfer() {
+	atomic.AddInt32(&f.transfers, -1)
+}
+
+// getTransfers shows whether there are any transfers in progress
+func (f *Fs) getTransfers() int32 {
+	return atomic.LoadInt32(&f.transfers)
+}
+
 // Open a new connection to the SFTP server.
 func (f *Fs) sftpConnection(ctx context.Context) (c *conn, err error) {
 	// Rate limit rate of new connections
@@ -395,8 +414,12 @@ func (f *Fs) newSftpClient(conn *ssh.Client, opts ...sftp.ClientOption) (*sftp.C
 	opts = opts[:len(opts):len(opts)] // make sure we don't overwrite the callers opts
 	opts = append(opts,
 		sftp.UseFstat(f.opt.UseFstat),
-		sftp.UseConcurrentReads(!f.opt.DisableConcurrentReads),
+		// FIXME disabled after library reversion
+		// sftp.UseConcurrentReads(!f.opt.DisableConcurrentReads),
 	)
+	if f.opt.DisableConcurrentReads { // FIXME
+		fs.Errorf(f, "Ignoring disable_concurrent_reads after library reversion - see #5197")
+	}
 
 	return sftp.NewClientPipe(pr, pw, opts...)
 }
@@ -474,6 +497,13 @@ func (f *Fs) putSftpConnection(pc **conn, err error) {
 func (f *Fs) drainPool(ctx context.Context) (err error) {
 	f.poolMu.Lock()
 	defer f.poolMu.Unlock()
+	if transfers := f.getTransfers(); transfers != 0 {
+		fs.Debugf(f, "Not closing %d unused connections as %d transfers in progress", len(f.pool), transfers)
+		if f.opt.IdleTimeout > 0 {
+			f.drain.Reset(time.Duration(f.opt.IdleTimeout)) // nudge on the pool emptying timer
+		}
+		return nil
+	}
 	if f.opt.IdleTimeout > 0 {
 		f.drain.Stop()
 	}
@@ -1354,18 +1384,19 @@ func (o *Object) stat(ctx context.Context) error {
 //
 // it also updates the info field
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	if o.fs.opt.SetModTime {
-		c, err := o.fs.getSftpConnection(ctx)
-		if err != nil {
-			return errors.Wrap(err, "SetModTime")
-		}
-		err = c.sftpClient.Chtimes(o.path(), modTime, modTime)
-		o.fs.putSftpConnection(&c, err)
-		if err != nil {
-			return errors.Wrap(err, "SetModTime failed")
-		}
+	if !o.fs.opt.SetModTime {
+		return nil
 	}
-	err := o.stat(ctx)
+	c, err := o.fs.getSftpConnection(ctx)
+	if err != nil {
+		return errors.Wrap(err, "SetModTime")
+	}
+	err = c.sftpClient.Chtimes(o.path(), modTime, modTime)
+	o.fs.putSftpConnection(&c, err)
+	if err != nil {
+		return errors.Wrap(err, "SetModTime failed")
+	}
+	err = o.stat(ctx)
 	if err != nil {
 		return errors.Wrap(err, "SetModTime stat failed")
 	}
@@ -1379,18 +1410,22 @@ func (o *Object) Storable() bool {
 
 // objectReader represents a file open for reading on the SFTP server
 type objectReader struct {
+	f          *Fs
 	sftpFile   *sftp.File
 	pipeReader *io.PipeReader
 	done       chan struct{}
 }
 
-func newObjectReader(sftpFile *sftp.File) *objectReader {
+func (f *Fs) newObjectReader(sftpFile *sftp.File) *objectReader {
 	pipeReader, pipeWriter := io.Pipe()
 	file := &objectReader{
+		f:          f,
 		sftpFile:   sftpFile,
 		pipeReader: pipeReader,
 		done:       make(chan struct{}),
 	}
+	// Show connection in use
+	f.addTransfer()
 
 	go func() {
 		// Use sftpFile.WriteTo to pump data so that it gets a
@@ -1420,6 +1455,8 @@ func (file *objectReader) Close() (err error) {
 	_ = file.pipeReader.Close()
 	// Wait for the background process to finish
 	<-file.done
+	// Show connection no longer in use
+	file.f.removeTransfer()
 	return err
 }
 
@@ -1453,12 +1490,14 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 			return nil, errors.Wrap(err, "Open Seek failed")
 		}
 	}
-	in = readers.NewLimitedReadCloser(newObjectReader(sftpFile), limit)
+	in = readers.NewLimitedReadCloser(o.fs.newObjectReader(sftpFile), limit)
 	return in, nil
 }
 
 // Update a remote sftp file using the data <in> and ModTime from <src>
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	o.fs.addTransfer() // Show transfer in progress
+	defer o.fs.removeTransfer()
 	// Clear the hash cache since we are about to update the object
 	o.md5sum = nil
 	o.sha1sum = nil
@@ -1496,10 +1535,28 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		remove()
 		return errors.Wrap(err, "Update Close failed")
 	}
+
+	// Set the mod time - this stats the object if o.fs.opt.SetModTime == true
 	err = o.SetModTime(ctx, src.ModTime(ctx))
 	if err != nil {
 		return errors.Wrap(err, "Update SetModTime failed")
 	}
+
+	// Stat the file after the upload to read its stats back if o.fs.opt.SetModTime == false
+	if !o.fs.opt.SetModTime {
+		err = o.stat(ctx)
+		if err == fs.ErrorObjectNotFound {
+			// In the specific case of o.fs.opt.SetModTime == false
+			// if the object wasn't found then don't return an error
+			fs.Debugf(o, "Not found after upload with set_modtime=false so returning best guess")
+			o.modTime = src.ModTime(ctx)
+			o.size = src.Size()
+			o.mode = os.FileMode(0666) // regular file
+		} else if err != nil {
+			return errors.Wrap(err, "Update stat failed")
+		}
+	}
+
 	return nil
 }
 

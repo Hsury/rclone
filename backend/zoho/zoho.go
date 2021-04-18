@@ -36,8 +36,8 @@ import (
 )
 
 const (
-	rcloneClientID              = "1000.OZNFWW075EKDSIE1R42HI9I2SUPC9A"
-	rcloneEncryptedClientSecret = "rn7myzbsYK3WlqO2EU6jU8wmj0ylsx7_1B5wvSaVncYbu1Wt0QxPW9FFbidjqAZtyxnBenYIWq1pcA"
+	rcloneClientID              = "1000.46MXF275FM2XV7QCHX5A7K3LGME66B"
+	rcloneEncryptedClientSecret = "U-2gxclZQBcOG9NPhjiXAhj-f0uQ137D0zar8YyNHXHkQZlTeSpIOQfmCb4oSpvosJp_SJLXmLLeUA"
 	minSleep                    = 10 * time.Millisecond
 	maxSleep                    = 2 * time.Second
 	decayConstant               = 2 // bigger for slower decay, exponential
@@ -96,6 +96,11 @@ func init() {
 					log.Fatalf("Failed to configure token: %v", err)
 				}
 			}
+
+			if fs.GetConfig(ctx).AutoConfirm {
+				return
+			}
+
 			if err = setupRoot(ctx, name, m); err != nil {
 				log.Fatalf("Failed to configure root directory: %v", err)
 			}
@@ -161,7 +166,7 @@ type Object struct {
 
 func setupRegion(m configmap.Mapper) {
 	region, ok := m.Get("region")
-	if !ok {
+	if !ok || region == "" {
 		log.Fatalf("No region set\n")
 	}
 	rootURL = fmt.Sprintf("https://workdrive.zoho.%s/api/v1", region)
@@ -372,6 +377,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err := configstruct.Set(m, opt); err != nil {
 		return nil, err
 	}
+	setupRegion(m)
 
 	root = parsePath(root)
 	oAuthClient, _, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
@@ -646,7 +652,7 @@ func (f *Fs) upload(ctx context.Context, name string, parent string, size int64,
 	params.Set("filename", name)
 	params.Set("parent_id", parent)
 	params.Set("override-name-exist", strconv.FormatBool(true))
-	formReader, contentType, overhead, err := rest.MultipartUpload(in, nil, "content", name)
+	formReader, contentType, overhead, err := rest.MultipartUpload(ctx, in, nil, "content", name)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to make multipart upload")
 	}

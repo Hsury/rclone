@@ -8,8 +8,8 @@ Configure
 
 First, you'll need to configure rclone.  As the object storage systems
 have quite complicated authentication these are kept in a config file.
-(See the `--config` entry for how to find the config file and choose
-its location.)
+(See the [`--config`](#config-config-file) entry for how to find the config
+file and choose its location.)
 
 The easiest way to make the config is to run rclone with the config
 option:
@@ -57,6 +57,7 @@ See the following for detailed instructions for
   * [SugarSync](/sugarsync/)
   * [Tardigrade](/tardigrade/)
   * [Union](/union/)
+  * [Uptobox](/uptobox/)
   * [WebDAV](/webdav/)
   * [Yandex Disk](/yandex/)
   * [Zoho WorkDrive](/zoho/)
@@ -639,25 +640,90 @@ See `--copy-dest` and `--backup-dir`.
 
 ### --config=CONFIG_FILE ###
 
-Specify the location of the rclone config file.
+Specify the location of the rclone configuration file, to override
+the default. E.g. `rclone config --config="rclone.conf"`.
 
-Normally the config file is in your home directory as a file called
-`.config/rclone/rclone.conf` (or `.rclone.conf` if created with an
-older version). If `$XDG_CONFIG_HOME` is set it will be at
-`$XDG_CONFIG_HOME/rclone/rclone.conf`.
+The exact default is a bit complex to describe, due to changes
+introduced through different versions of rclone while preserving
+backwards compatibility, but in most cases it is as simple as:
 
-If there is a file `rclone.conf` in the same directory as the rclone
-executable it will be preferred. This file must be created manually
-for Rclone to use it, it will never be created automatically.
+ - `%APPDATA%/rclone/rclone.conf` on Windows
+ - `~/.config/rclone/rclone.conf` on other
+
+The complete logic is as follows: Rclone will look for an existing
+configuration file in any of the following locations, in priority order:
+
+  1. `rclone.conf` (in program directory, where rclone executable is)
+  2. `%APPDATA%/rclone/rclone.conf` (only on Windows)
+  3. `$XDG_CONFIG_HOME/rclone/rclone.conf` (on all systems, including Windows)
+  4. `~/.config/rclone/rclone.conf` (see below for explanation of ~ symbol)
+  5. `~/.rclone.conf`
+
+If no existing configuration file is found, then a new one will be created
+in the following location:
+
+- On Windows: Location 2 listed above, except in the unlikely event
+  that `APPDATA` is not defined, then location 4 is used instead.
+- On Unix: Location 3 if `XDG_CONFIG_HOME` is defined, else location 4.
+- Fallback to location 5 (on all OS), when the rclone directory cannot be
+  created, but if also a home directory was not found then path
+  `.rclone.conf` relative to current working directory will be used as
+  a final resort.
+
+The `~` symbol in paths above represent the home directory of the current user
+on any OS, and the value is defined as following:
+
+  - On Windows: `%HOME%` if defined, else `%USERPROFILE%`, or else `%HOMEDRIVE%\%HOMEPATH%`.
+  - On Unix: `$HOME` if defined, else by looking up current user in OS-specific user database
+    (e.g. passwd file), or else use the result from shell command `cd && pwd`.
 
 If you run `rclone config file` you will see where the default
 location is for you.
 
-Use this flag to override the config location, e.g. `rclone
---config=".myconfig" .config`.
+The fact that an existing file `rclone.conf` in the same directory
+as the rclone executable is always preferred, means that it is easy
+to run in "portable" mode by downloading rclone executable to a
+writable directory and then create an empty file `rclone.conf` in the
+same directory.
 
-If this is set to empty string or the special value `/notfound` then
-rclone will keep the config file in memory only.
+If the location is set to empty string `""` or path to a file
+with name `notfound`, or the os null device represented by value `NUL` on
+Windows and `/dev/null` on Unix systems, then rclone will keep the
+config file in memory only.
+
+The file format is basic [INI](https://en.wikipedia.org/wiki/INI_file#Format):
+Sections of text, led by a `[section]` header and followed by
+`key=value` entries on separate lines. In rclone each remote is
+represented by its own section, where the section name defines the
+name of the remote. Options are specified as the `key=value` entries,
+where the key is the option name without the `--backend-` prefix,
+in lowercase and with `_` instead of `-`. E.g. option `--mega-hard-delete`
+corresponds to key `hard_delete`. Only backend options can be specified.
+A special, and required, key `type` identifies the [storage system](/overview/),
+where the value is the internal lowercase name as returned by command
+`rclone help backends`. Comments are indicated by `;` or `#` at the
+beginning of a line.
+
+Example:
+
+    [megaremote]
+    type = mega
+    user = you@example.com
+    pass = PDPcQVVjVtzFY-GTdDFozqBhTdsPg3qH
+
+Note that passwords are in [obscured](/commands/rclone_obscure/)
+form. Also, many storage systems uses token-based authentication instead
+of passwords, and this requires additional steps. It is easier, and safer,
+to use the interactive command `rclone config` instead of manually
+editing the configuration file.
+
+The configuration file will typically contain login information, and
+should therefore have restricted permissions so that only the current user
+can read it. Rclone tries to ensure this when it writes the file.
+You may also choose to [encrypt](#configuration-encryption) the file.
+
+When token-based authentication are used, the configuration file
+must be writable, because rclone needs to update the tokens inside it.
 
 ### --contimeout=TIME ###
 
@@ -750,6 +816,27 @@ triggering follow-on actions if data was copied, or skipping if not.
 
 NB: Enabling this option turns a usually non-fatal error into a potentially
 fatal one - please check and adjust your scripts accordingly!
+
+### --fs-cache-expire-duration=TIME
+
+When using rclone via the API rclone caches created remotes for 5
+minutes by default in the "fs cache". This means that if you do
+repeated actions on the same remote then rclone won't have to build it
+again from scratch, which makes it more efficient.
+
+This flag sets the time that the remotes are cached for. If you set it
+to `0` (or negative) then rclone won't cache the remotes at all.
+
+Note that if you use some flags, eg `--backup-dir` and if this is set
+to `0` rclone may build two remotes (one for the source or destination
+and one for the `--backup-dir` where it may have only built one
+before.
+
+### --fs-cache-expire-interval=TIME
+
+This controls how often rclone checks for cached remotes to expire.
+See the `--fs-cache-expire-duration` documentation above for more
+info. The default is 60s, set to 0 to disable expiry.
 
 ### --header ###
 
@@ -1833,11 +1920,12 @@ Nevertheless, rclone will read any configuration file found
 according to the rules described [above](https://rclone.org/docs/#config-config-file).
 If an encrypted configuration file is found, this means you will be prompted for
 password (unless using `--password-command`). To avoid this, you can bypass
-the loading of the configuration file by overriding the location with an empty
-string `""` or the special value `/notfound`, or the os null device represented
-by value `NUL` on Windows and `/dev/null` on Unix systems (before rclone
-version 1.55 only this null device alternative was supported).
-E.g. `rclone --config="" genautocomplete bash`.
+the loading of the default configuration file by overriding the location,
+e.g. with one of the documented special values for memory-only configuration:
+
+```
+rclone genautocomplete bash --config=""
+```
 
 Developer options
 -----------------
@@ -2062,7 +2150,7 @@ mys3:
 Note that if you want to create a remote using environment variables
 you must create the `..._TYPE` variable as above.
 
-Note also that now rclone has [connectionstrings](#connection-strings),
+Note also that now rclone has [connection strings](#connection-strings),
 it is probably easier to use those instead which makes the above example
 
     rclone lsd :s3,access_key_id=XXX,secret_access_key=XXX:
